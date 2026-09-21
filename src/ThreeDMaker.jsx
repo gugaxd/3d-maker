@@ -931,15 +931,10 @@ export default function ThreeDMaker() {
       return hits.length ? hits[0].object : null;
     };
 
-    /* Só dá para arrastar a forma quando o que está na tela é o valor editável:
-       parado, e sem interpolação por baixo. Sobre um keyframe vale, e a edição
-       cai nele, igual aos campos numéricos. */
-    const editavel = (obj) => {
-      const st = stateRef.current;
-      if (st.playing || st.recording) return false;
-      if (!obj.keyframes.length) return true;
-      return obj.keyframes.some((k) => Math.abs(k.t - st.playhead) < 0.05);
-    };
+    /* Durante a reprodução a transformação é da animação, não do ponteiro:
+       arrastar ali brigaria com a timeline. Parado, vale em qualquer tempo —
+       com keyframes, a edição vira keyframe no tempo da agulha. */
+    const editavel = () => !stateRef.current.playing && !stateRef.current.recording;
 
     const down = (e) => {
       el.setPointerCapture(e.pointerId);
@@ -952,7 +947,7 @@ export default function ThreeDMaker() {
         if (mesh) {
           const obj = stateRef.current.objects.find((o) => o.id === mesh.userData.id);
           setSelectedId(mesh.userData.id);
-          if (obj && editavel(obj)) {
+          if (obj && editavel()) {
             const s = sampleAt(obj, stateRef.current.playhead, stateRef.current.easing);
             if (e.altKey || e.button === 2) {
               drag = { mode: "girar", id: obj.id, x: e.clientX, y: e.clientY,
@@ -1058,14 +1053,29 @@ export default function ThreeDMaker() {
       if (o.id !== id) return o;
       const next = { ...o, ...data };
       const touchesTransform = ["position", "rotation", "scale", "translucency"].some((k) => k in data);
+      /* Com o objeto animado, o que vale é o valor no tempo da agulha: a edição
+         atualiza o keyframe sob ela, ou cria um ali se não houver. Sem isso a
+         mudança iria só para a base, que fica sombreada pelos keyframes, e o
+         valor sumiria sem deixar rastro na tela. */
       if (touchesTransform && next.keyframes.length) {
         const t = stateRef.current.playhead;
         const idx = next.keyframes.findIndex((k) => Math.abs(k.t - t) < 0.05);
-        if (idx >= 0) {
-          const kfs = [...next.keyframes];
-          kfs[idx] = snapshot(next, kfs[idx].t);
-          next.keyframes = kfs;
-        }
+        /* O keyframe parte do que está na tela em t, com a mudança por cima. Partir
+           da base faria os canais não editados saltarem para um valor que os
+           keyframes sombreiam — mexer só na rotação puxaria a posição junto. */
+        const atual = sampleAt(o, t, stateRef.current.easing);
+        const alvo = {
+          position: [...(data.position ?? atual.position)],
+          rotation: [...(data.rotation ?? atual.rotation)],
+          scale: [...(data.scale ?? atual.scale)],
+          translucency: data.translucency ?? atual.translucency,
+        };
+        Object.assign(next, alvo);
+        const kfs = [...next.keyframes];
+        const kf = snapshot(alvo, idx >= 0 ? kfs[idx].t : t);
+        if (idx >= 0) kfs[idx] = kf;
+        else { kfs.push(kf); kfs.sort((x, y) => x.t - y.t); }
+        next.keyframes = kfs;
       }
       return next;
     }));
@@ -1112,7 +1122,7 @@ export default function ThreeDMaker() {
     if (!sel) return;
     const t = round(playhead, 3);
     const kfs = sel.keyframes.filter((k) => Math.abs(k.t - t) >= 0.05);
-    kfs.push(snapshot(sel, t));
+    kfs.push(snapshot(sampleAt(sel, playhead, easing), t));
     kfs.sort((a, b) => a.t - b.t);
     patch(sel.id, { keyframes: kfs });
   };
@@ -1122,9 +1132,11 @@ export default function ThreeDMaker() {
   };
   const spin360 = () => {
     if (!sel) return;
-    const a = snapshot(sel, 0);
-    const b = snapshot(sel, duration);
-    b.rotation = [sel.rotation[0], sel.rotation[1] + 360, sel.rotation[2]];
+    /* parte do que está na tela, não da base, que os keyframes podem estar sombreando */
+    const atual = sampleAt(sel, playhead, easing);
+    const a = snapshot(atual, 0);
+    const b = snapshot(atual, duration);
+    b.rotation = [atual.rotation[0], atual.rotation[1] + 360, atual.rotation[2]];
     patch(sel.id, { keyframes: [a, b] });
     setStatus("Giro de 360° criado em Y.");
   };
@@ -1249,6 +1261,9 @@ export default function ThreeDMaker() {
   };
 
   const keyAtPlayhead = sel?.keyframes.some((k) => Math.abs(k.t - playhead) < 0.05);
+  /* Os controles mostram o valor no tempo da agulha, que é o que está na tela.
+     Sem keyframes isso é a própria base do objeto. */
+  const selT = sel ? sampleAt(sel, playhead, easing) : null;
 
   return (
     <div className="app">
@@ -1323,12 +1338,12 @@ export default function ThreeDMaker() {
             {/* Transformação */}
             <section className="sec">
               <h2 className="sec-title">Transformação</h2>
-              <Eixos label="Posição" values={sel.position} step={0.1} onChange={(v) => patch(sel.id, { position: v })} />
-              <Eixos label="Rotação" values={sel.rotation} step={5} unit="°" onChange={(v) => patch(sel.id, { rotation: v })} />
-              <Eixos label="Escala" values={sel.scale} step={0.05} onChange={(v) => patch(sel.id, { scale: v })} />
-              <Slider label="Escala uniforme" min={5} max={300} value={round(sel.scale[0] * 100)} unit="%"
+              <Eixos label="Posição" values={selT.position} step={0.1} onChange={(v) => patch(sel.id, { position: v })} />
+              <Eixos label="Rotação" values={selT.rotation} step={5} unit="°" onChange={(v) => patch(sel.id, { rotation: v })} />
+              <Eixos label="Escala" values={selT.scale} step={0.05} onChange={(v) => patch(sel.id, { scale: v })} />
+              <Slider label="Escala uniforme" min={5} max={300} value={round(selT.scale[0] * 100)} unit="%"
                 onChange={(v) => patch(sel.id, { scale: [v / 100, v / 100, v / 100] })} />
-              <Slider label="Translucência" value={sel.translucency} unit="%" accent={C.mag}
+              <Slider label="Translucência" value={selT.translucency} unit="%" accent={C.mag}
                 onChange={(v) => patch(sel.id, { translucency: v })} />
               <button className="btn" onClick={() => patch(sel.id, { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1], translucency: 0 })}>
                 Zerar transformação
@@ -1339,7 +1354,7 @@ export default function ThreeDMaker() {
                 mesmos gestos valem para a câmera, e <b>shift+arrastar</b> a desloca. A silhueta e as
                 bordas continuam densas mesmo no máximo de translucência — o miolo é que deixa passar.
                 {keyAtPlayhead && <> A agulha está sobre um <b>keyframe</b>: as mudanças acima são gravadas nele.</>}
-                {!!sel.keyframes.length && !keyAtPlayhead && <> Entre keyframes o valor na tela é interpolado, então o arrasto no palco fica desligado — leve a agulha até um keyframe para editar.</>}
+                {!!sel.keyframes.length && !keyAtPlayhead && <> O objeto está animado e a agulha não está sobre um keyframe, então qualquer mudança acima <b>cria um keyframe</b> em {round(playhead, 2)}s.</>}
               </p>
             </section>
 
