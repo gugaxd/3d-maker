@@ -21,6 +21,7 @@ import {
   PMREMGenerator,
   Path,
   PerspectiveCamera,
+  Plane,
   PlaneGeometry,
   Raycaster,
   RingGeometry,
@@ -39,6 +40,9 @@ import {
 import Header from "./components/Header.jsx";
 import Footer from "./components/Footer.jsx";
 import { MONO, SANS } from "./theme.js";
+
+/* Menu do hub de ferramentas (repo graphic-design-hub). Em dev aponta pro servidor local. */
+const HUB_URL = import.meta.env.DEV ? "http://localhost:5180/" : "https://design-tools-gugaxd.vercel.app/";
 
 /* ============================================================
    3d maker — gerador de formas 3D
@@ -82,12 +86,14 @@ ${FONTE_MARCA}
 /* ---- cabeçalho ---- */
 .brand{padding:18px 18px 14px;border-bottom:1px solid ${C.line};position:sticky;top:0;
   background:${C.ink2};z-index:5;display:flex;align-items:center;justify-content:space-between;gap:10px}
-.marca{display:flex;align-items:center;gap:11px;min-width:0}
+.marca{display:flex;align-items:center;gap:11px;min-width:0;text-decoration:none}
+        a.marca:focus-visible{outline:2px solid ${C.cyan};outline-offset:4px}
+        .acoes{display:flex;gap:6px;flex:none}
 .marca .logo{height:20px;width:auto;display:block;color:${C.text};flex:none}
 .marca .risco{width:1px;align-self:stretch;margin:1px 0;background:${C.line};flex:none}
 .brand h1{margin:0;font-family:"Host Grotesk",${SANS};font-size:19px;font-weight:600;
   letter-spacing:-.005em;text-transform:lowercase;line-height:1;color:${C.text}}
-.tema{flex:0 0 auto;width:30px;height:30px;padding:6px;background:${C.ink};
+.tema{flex:0 0 auto;display:block;width:30px;height:30px;padding:6px;background:${C.ink};
   border:1px solid ${C.line};border-radius:2px;cursor:pointer;color:${C.muted}}
 .tema:hover{background:${C.cyan};border-color:${C.cyan};color:${C.sobreCyan}}
 .tema:focus-visible{outline:2px solid ${C.cyan};outline-offset:1px}
@@ -899,20 +905,113 @@ export default function ThreeDMaker() {
     }
   }, [objects]);
 
-  /* ---- órbita + seleção ---- */
+  /* ---- palco: órbita, seleção e manipulação direta ---- */
   useEffect(() => {
     const el = rendererRef.current?.domElement;
     if (!el) return;
-    let drag = null, moved = 0;
+
+    const rc = new Raycaster();
+    const plane = new Plane();
+    const camDir = new Vector3();
+    const hit = new Vector3();
+    let drag = null;
+
+    const ndcOf = (e) => {
+      const r = el.getBoundingClientRect();
+      return new Vector2(
+        ((e.clientX - r.left) / r.width) * 2 - 1,
+        -((e.clientY - r.top) / r.height) * 2 + 1
+      );
+    };
+
+    const meshUnder = (e) => {
+      rc.setFromCamera(ndcOf(e), cameraRef.current);
+      const alvos = [...meshesRef.current.values()].filter((m) => m.visible);
+      const hits = rc.intersectObjects(alvos, false);
+      return hits.length ? hits[0].object : null;
+    };
+
+    /* Só dá para arrastar a forma quando o que está na tela é o valor editável:
+       parado, e sem interpolação por baixo. Sobre um keyframe vale, e a edição
+       cai nele, igual aos campos numéricos. */
+    const editavel = (obj) => {
+      const st = stateRef.current;
+      if (st.playing || st.recording) return false;
+      if (!obj.keyframes.length) return true;
+      return obj.keyframes.some((k) => Math.abs(k.t - st.playhead) < 0.05);
+    };
+
     const down = (e) => {
       el.setPointerCapture(e.pointerId);
-      drag = { x: e.clientX, y: e.clientY, pan: e.shiftKey || e.button === 1 };
-      moved = 0;
+      drag = null;
+      const camera = cameraRef.current;
+      const soCamera = e.button === 1 || e.shiftKey;
+
+      if (!soCamera) {
+        const mesh = meshUnder(e);
+        if (mesh) {
+          const obj = stateRef.current.objects.find((o) => o.id === mesh.userData.id);
+          setSelectedId(mesh.userData.id);
+          if (obj && editavel(obj)) {
+            const s = sampleAt(obj, stateRef.current.playhead, stateRef.current.easing);
+            if (e.altKey || e.button === 2) {
+              drag = { mode: "girar", id: obj.id, x: e.clientX, y: e.clientY,
+                       dx: 0, dy: 0, rot0: [...s.rotation] };
+              el.style.cursor = "crosshair";
+            } else {
+              /* plano paralelo à tela passando pela forma: o arrasto vira
+                 deslocamento no mundo sem depender da profundidade do clique */
+              camera.getWorldDirection(camDir);
+              plane.setFromNormalAndCoplanarPoint(camDir, mesh.position);
+              rc.setFromCamera(ndcOf(e), camera);
+              const ancora = new Vector3();
+              if (rc.ray.intersectPlane(plane, ancora)) {
+                drag = { mode: "mover", id: obj.id, ancora, pos0: [...s.position] };
+                el.style.cursor = "move";
+              }
+            }
+            if (drag) return;
+          }
+        }
+      }
+      drag = { mode: "camera", x: e.clientX, y: e.clientY, pan: e.shiftKey || e.button === 1 };
+      el.style.cursor = "";
     };
+
     const move = (e) => {
-      if (!drag) return;
+      if (!drag) {
+        el.style.cursor = meshUnder(e) ? "move" : "";
+        return;
+      }
+
+      if (drag.mode === "mover") {
+        rc.setFromCamera(ndcOf(e), cameraRef.current);
+        if (!rc.ray.intersectPlane(plane, hit)) return;
+        patch(drag.id, {
+          position: [
+            round(drag.pos0[0] + hit.x - drag.ancora.x, 3),
+            round(drag.pos0[1] + hit.y - drag.ancora.y, 3),
+            round(drag.pos0[2] + hit.z - drag.ancora.z, 3),
+          ],
+        });
+        return;
+      }
+
+      if (drag.mode === "girar") {
+        drag.dx += e.clientX - drag.x;
+        drag.dy += e.clientY - drag.y;
+        drag.x = e.clientX; drag.y = e.clientY;
+        patch(drag.id, {
+          rotation: [
+            round(drag.rot0[0] + drag.dy * 0.5, 1),
+            round(drag.rot0[1] + drag.dx * 0.5, 1),
+            round(drag.rot0[2], 1),
+          ],
+        });
+        return;
+      }
+
       const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
-      moved += Math.abs(dx) + Math.abs(dy);
       drag.x = e.clientX; drag.y = e.clientY;
       const o = orbitRef.current;
       if (drag.pan) {
@@ -925,34 +1024,31 @@ export default function ThreeDMaker() {
         o.phi = clamp(o.phi - dy * 0.006, 0.06, Math.PI - 0.06);
       }
     };
+
     const up = (e) => {
-      if (drag && moved < 5) pick(e);
       drag = null;
+      el.style.cursor = "";
+      if (el.hasPointerCapture(e.pointerId)) el.releasePointerCapture(e.pointerId);
     };
     const wheel = (e) => {
       e.preventDefault();
       orbitRef.current.radius = clamp(orbitRef.current.radius * (1 + Math.sign(e.deltaY) * 0.1), 1.2, 40);
     };
-    const pick = (e) => {
-      const rect = el.getBoundingClientRect();
-      const ndc = new Vector2(
-        ((e.clientX - rect.left) / rect.width) * 2 - 1,
-        -((e.clientY - rect.top) / rect.height) * 2 + 1
-      );
-      const rc = new Raycaster();
-      rc.setFromCamera(ndc, cameraRef.current);
-      const hits = rc.intersectObjects([...meshesRef.current.values()].filter((m) => m.visible), false);
-      if (hits.length) setSelectedId(hits[0].object.userData.id);
-    };
+    const menu = (e) => e.preventDefault();
+
     el.addEventListener("pointerdown", down);
     el.addEventListener("pointermove", move);
     el.addEventListener("pointerup", up);
+    el.addEventListener("pointercancel", up);
     el.addEventListener("wheel", wheel, { passive: false });
+    el.addEventListener("contextmenu", menu);
     return () => {
       el.removeEventListener("pointerdown", down);
       el.removeEventListener("pointermove", move);
       el.removeEventListener("pointerup", up);
+      el.removeEventListener("pointercancel", up);
       el.removeEventListener("wheel", wheel);
+      el.removeEventListener("contextmenu", menu);
     };
   }, []);
 
@@ -1160,7 +1256,7 @@ export default function ThreeDMaker() {
 
       {/* ============================ PAINEL ============================ */}
       <aside className="panel">
-        <Header tool="3d maker" tema={tema} onToggleTema={() => setTema(tema === "escuro" ? "claro" : "escuro")} />
+        <Header tool="3d maker" homeHref={HUB_URL} tema={tema} onToggleTema={() => setTema(tema === "escuro" ? "claro" : "escuro")} />
 
         {/* Objetos */}
         <section className="sec">
@@ -1238,8 +1334,12 @@ export default function ThreeDMaker() {
                 Zerar transformação
               </button>
               <p className="hint">
-                A silhueta e as bordas continuam densas mesmo no máximo — o miolo é que deixa passar.
+                No palco, <b>arrastar a forma</b> muda a posição e <b>alt+arrastar</b> — ou o botão
+                direito — muda a rotação; os campos acima acompanham em tempo real. Sobre o fundo os
+                mesmos gestos valem para a câmera, e <b>shift+arrastar</b> a desloca. A silhueta e as
+                bordas continuam densas mesmo no máximo de translucência — o miolo é que deixa passar.
                 {keyAtPlayhead && <> A agulha está sobre um <b>keyframe</b>: as mudanças acima são gravadas nele.</>}
+                {!!sel.keyframes.length && !keyAtPlayhead && <> Entre keyframes o valor na tela é interpolado, então o arrasto no palco fica desligado — leve a agulha até um keyframe para editar.</>}
               </p>
             </section>
 
@@ -1339,7 +1439,7 @@ export default function ThreeDMaker() {
           <span><b>{round(playhead, 2)}</b> / {duration}s</span>
           <span className="sp" />
           {recording && <span className="rec">gravando</span>}
-          <span>arrastar gira · shift+arrastar move · scroll aproxima</span>
+          <span>arrastar a forma move · alt ou botão direito gira · fundo orbita · scroll aproxima</span>
         </div>
 
         <div className="view">
