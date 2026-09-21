@@ -195,7 +195,7 @@ input[type=text]{flex:1;background:${C.ink};border:1px solid ${C.line};color:${C
 .agulha{position:absolute;top:-1px;bottom:-1px;width:1px;background:${C.cyan};pointer-events:none}
 .agulha::before{content:"";position:absolute;top:-1px;left:-3px;width:7px;height:4px;background:${C.cyan}}
 .kf{position:absolute;top:50%;width:9px;height:9px;margin:-5px 0 0 -5px;background:${C.muted};
-  border:1px solid ${C.ink};transform:rotate(45deg);border-radius:1px}
+  border:1px solid ${C.ink};transform:rotate(45deg);border-radius:1px;cursor:ew-resize}
 .kf[data-on="1"]{background:${C.mag}}
 .tl .conta{font-family:${MONO};font-size:10px;letter-spacing:.04em;color:${C.muted};flex:none}
 
@@ -735,6 +735,7 @@ export default function ThreeDMaker() {
   const ambRef = useRef(null);
   const recRef = useRef(null);
   const fileRef = useRef(null);
+  const kfDragRef = useRef(null);
 
   stateRef.current = { objects, playhead, playing, duration, easing, recording, selectedId };
 
@@ -1130,6 +1131,17 @@ export default function ThreeDMaker() {
     if (!sel) return;
     patch(sel.id, { keyframes: sel.keyframes.filter((k) => k.t !== t) });
   };
+  /* Reposiciona um keyframe no tempo. Devolve o novo t, ou null quando o alvo
+     está em cima de outro keyframe — soltar um sobre o outro apagaria pose. */
+  const moveKey = (de, para) => {
+    if (!sel) return null;
+    const t = round(clamp(para, 0, duration), 3);
+    if (t === de) return null;
+    if (sel.keyframes.some((k) => k.t !== de && Math.abs(k.t - t) < 0.05)) return null;
+    const kfs = sel.keyframes.map((k) => (k.t === de ? { ...k, t } : k)).sort((a, b) => a.t - b.t);
+    patch(sel.id, { keyframes: kfs });
+    return t;
+  };
   const spin360 = () => {
     if (!sel) return;
     /* parte do que está na tela, não da base, que os keyframes podem estar sombreando */
@@ -1396,6 +1408,10 @@ export default function ThreeDMaker() {
                 </select>
               </Field>
               <Slider label="Duração" min={1} max={30} step={0.5} value={duration} unit="s" onChange={setDuration} />
+              <p className="hint">
+                Na trilha, <b>arrastar um keyframe</b> muda o tempo dele e <b>clique duplo</b> remove.
+                Soltar em cima de outro não vale — a pose que está lá se perderia.
+              </p>
             </section>
           </>
         )}
@@ -1471,12 +1487,38 @@ export default function ThreeDMaker() {
           <button className="btn" onClick={() => { stateRef.current.playhead = 0; setPlayhead(0); setPlaying(false); }}>
             Início
           </button>
-          <div className="trilha" ref={trackRef} onPointerDown={scrub} onPointerMove={(e) => e.buttons === 1 && scrub(e)}>
+          <div className="trilha" ref={trackRef} onPointerDown={scrub}
+            onPointerMove={(e) => {
+              const d = kfDragRef.current;
+              if (!d) { if (e.buttons === 1) scrub(e); return; }
+              /* zona morta: sem ela um tremor do mouse desloca o keyframe e
+                 remonta o marcador, o que engoliria o clique duplo de remover */
+              if (!d.ativo && Math.abs(e.clientX - d.x0) < 3) return;
+              d.ativo = true;
+              const r = trackRef.current.getBoundingClientRect();
+              const novo = moveKey(d.t, ((e.clientX - r.left) / r.width) * duration);
+              if (novo == null) return;
+              d.t = novo;
+              stateRef.current.playhead = novo;
+              setPlayhead(novo);
+            }}
+            onPointerUp={() => { kfDragRef.current = null; }}
+            onPointerCancel={() => { kfDragRef.current = null; }}>
             <div className="agulha" style={{ left: `${(playhead / duration) * 100}%` }} />
             {sel?.keyframes.map((k) => (
               <span key={k.t} className="kf" data-on={Math.abs(k.t - playhead) < 0.05 ? 1 : 0}
                 style={{ left: `${(k.t / duration) * 100}%` }}
-                title={`${k.t}s — clique duplo remove`}
+                title={`${k.t}s — arraste para mover, clique duplo remove`}
+                onPointerDown={(e) => {
+                  /* o ponteiro fica preso à trilha, não ao marcador: ele remonta a
+                     cada mudança de t, porque a chave do React é o próprio tempo */
+                  e.stopPropagation();
+                  trackRef.current.setPointerCapture(e.pointerId);
+                  kfDragRef.current = { t: k.t, x0: e.clientX, ativo: false };
+                  stateRef.current.playhead = k.t;
+                  setPlayhead(k.t);
+                  setPlaying(false);
+                }}
                 onDoubleClick={(e) => { e.stopPropagation(); removeKey(k.t); }} />
             ))}
           </div>
