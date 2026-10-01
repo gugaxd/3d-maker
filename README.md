@@ -8,7 +8,7 @@ Gerador de formas 3D para design gráfico e motion. Roda inteiramente no navegad
 - **SVG importado** — alternável entre extrudado, com profundidade e chanfro, e plano; contornos internos viram furos automaticamente
 - **Cena** — um objeto ou vários, em lista, com seleção por clique no palco
 - **Transformação** — posição, rotação e escala por eixo, escala uniforme e translucência
-- **Material** — fosco, brilhante, metal, vidro, chapado e arame, com cor e rugosidade
+- **Material** — fosco, brilhante, metal, vidro colorido, chapado e arame, com cor e rugosidade
 - **Animação** — timeline com keyframes por objeto, interpolação linear ou suave, e atalho para giro de 360°
 - **Exportação** — PNG com alpha, SVG vetorial e WebM com canal alpha
 
@@ -18,6 +18,13 @@ A translucência não é opacidade linear: o alpha é modulado por Fresnel dentr
 `onBeforeCompile`. A silhueta, o chanfro e as curvas de fuga continuam densos e só o miolo deixa
 passar, que é como vidro se comporta. No máximo o alpha de base para em 7%, então o objeto nunca
 some. O `envMapIntensity` sobe junto, para o reflexo crescer com a translucência.
+
+O vidro tem shader próprio. A base física entra com cor difusa preta e entrega só o reflexo do
+ambiente — um estúdio desenhado em canvas, com janelas de caixilho, que só esse material usa. O
+corpo é montado em cima: miolo claro e atravessável, borda funda na cor escolhida e uma faixa de
+luz por dentro da silhueta, do lado oposto à luz principal. A cor sai pré-multiplicada pelo alpha,
+então o vidro funciona sobre o fundo transparente do PNG e do WebM. A translucência controla o
+quanto o miolo deixa passar, e a rugosidade vira vidro jateado.
 
 O SVG importado é convertido por um parser próprio de `path`, `rect`, `circle`, `ellipse`,
 `polygon` e `polyline`, com suporte a `transform` acumulado. Curvas e arcos são amostrados em

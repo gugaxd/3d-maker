@@ -580,6 +580,84 @@ function attachFresnelAlpha(mat) {
   return mat;
 }
 
+/**
+ * Estúdio só do vidro: fundo cinza com janelas de softbox. É o reflexo dessas janelas,
+ * curvado pela forma, que faz o objeto ler como vidro — um gradiente liso não basta.
+ * Os outros acabamentos continuam no ambiente da cena, então nada muda neles.
+ */
+let GLASS_ENV = null;
+function studioCanvas() {
+  const W = 1024, H = 512;
+  const c = document.createElement("canvas");
+  c.width = W; c.height = H;
+  const ctx = c.getContext("2d");
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, "#5f6268"); g.addColorStop(0.48, "#3e4045");
+  g.addColorStop(0.52, "#232427"); g.addColorStop(1, "#0e0e10");
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  // janela de caixilho: retângulo claro cortado por montantes escuros
+  const janela = (u0, u1, v0, v1, cols, rows, luz = "#ffffff") => {
+    const x = u0 * W, y = v0 * H, w = (u1 - u0) * W, h = (v1 - v0) * H, bar = Math.max(4, w * 0.035);
+    ctx.fillStyle = luz; ctx.fillRect(x, y, w, h);
+    ctx.fillStyle = "#2a2b2f";
+    for (let i = 1; i < cols; i++) ctx.fillRect(x + (w * i) / cols - bar / 2, y, bar, h);
+    for (let j = 1; j < rows; j++) ctx.fillRect(x, y + (h * j) / rows - bar / 2, w, bar);
+  };
+  janela(0.6, 0.78, 0.06, 0.3, 2, 2);
+  janela(0.84, 0.9, 0.18, 0.46, 1, 2, "#e8ecf4");
+  janela(0.08, 0.2, 0.22, 0.42, 1, 1, "#dfe3ea");
+  janela(0.34, 0.42, 0.06, 0.2, 1, 1, "#f2f2f2");
+  return c;
+}
+
+/**
+ * Vidro colorido. A base física só entrega o especular (reflexo do estúdio, brilho e
+ * verniz): a cor difusa é preta. O corpo é montado no shader — miolo claro e
+ * atravessável, borda funda e densa, e uma faixa de luz por dentro da silhueta do
+ * lado oposto à luz principal, que é a luz refratada que o vidro maciço concentra.
+ * A cor sai pré-multiplicada pelo alpha, então funciona sobre fundo transparente.
+ */
+const GLASS_FRAG = `{
+  vec3 gN = normalize( normal );
+  vec3 gV = normalize( vViewPosition );
+  float edge = 1.0 - clamp( abs( dot( gN, gV ) ), 0.0, 1.0 );
+  float fres = pow( edge, 2.2 );
+  vec3 claro = mix( uTint, vec3( 1.0 ), 0.12 );
+  vec3 fundo = uTint * uTint * 0.7;
+  vec3 corpo = mix( claro, fundo, smoothstep( 0.0, 0.85, edge ) );
+  float aCorpo = mix( mix( 0.92, 0.2, uClarity ), 0.97, fres );
+  if ( !gl_FrontFacing ) aCorpo *= 0.4;
+  float avesso = 0.4;
+  #if NUM_DIR_LIGHTS > 0
+    avesso = clamp( 0.2 - dot( gN, directionalLights[ 0 ].direction ) * 1.4, 0.0, 1.0 );
+  #endif
+  float faixa = smoothstep( 0.3, 0.68, edge ) * ( 1.0 - smoothstep( 0.82, 0.97, edge ) );
+  vec3 brilho = mix( uTint, vec3( 1.0 ), 0.65 ) * faixa * avesso * ( gl_FrontFacing ? 1.6 : 0.0 );
+  // só o reflexo do ambiente: o ponto de luz direta deixaria o vidro com cara de plástico
+  vec3 spec = 1.0 - exp( -reflectedLight.indirectSpecular );
+  float a = clamp( aCorpo + max( spec.r, max( spec.g, spec.b ) ) + max( brilho.r, max( brilho.g, brilho.b ) ) * 0.5, 0.0, 1.0 );
+  gl_FragColor = vec4( ( corpo * aCorpo + brilho + spec ) / max( a, 1e-4 ), a );
+}`;
+function buildGlass(o, rough) {
+  const mat = new MeshPhysicalMaterial({
+    color: 0x000000, metalness: 0, roughness: clamp(rough * 0.4, 0.02, 1), ior: 1.5,
+    envMap: GLASS_ENV, envMapIntensity: 9,
+    side: DoubleSide, transparent: true, depthWrite: false,
+  });
+  const uniforms = { uTint: { value: new Color(o.color) }, uClarity: { value: 0.7 } };
+  mat.userData.uniforms = uniforms;
+  mat.userData.glass = true;
+  mat.onBeforeCompile = (shader) => {
+    shader.uniforms.uTint = uniforms.uTint;
+    shader.uniforms.uClarity = uniforms.uClarity;
+    shader.fragmentShader =
+      "uniform vec3 uTint;\nuniform float uClarity;\n" +
+      shader.fragmentShader.replace("#include <opaque_fragment>", GLASS_FRAG);
+  };
+  mat.customProgramCacheKey = () => "glass";
+  return mat;
+}
+
 function buildMaterial(o) {
   const color = new Color(o.color);
   const rough = o.roughness / 100;
@@ -592,10 +670,7 @@ function buildMaterial(o) {
     case "glossy":
       return attachFresnelAlpha(new MeshStandardMaterial({ ...common, metalness: 0.1, roughness: clamp(rough * 0.5, 0.02, 1) }));
     case "glass":
-      return attachFresnelAlpha(new MeshPhysicalMaterial({
-        ...common, metalness: 0, roughness: clamp(rough * 0.25, 0.01, 1),
-        clearcoat: 1, clearcoatRoughness: 0.04, reflectivity: 0.9,
-      }));
+      return buildGlass(o, rough);
     default:
       return attachFresnelAlpha(new MeshStandardMaterial({ ...common, metalness: 0, roughness: clamp(0.35 + rough * 0.65, 0, 1) }));
   }
@@ -784,7 +859,11 @@ export default function ThreeDMaker() {
       tex.mapping = EquirectangularReflectionMapping;
       const pmrem = new PMREMGenerator(renderer);
       scene.environment = pmrem.fromEquirectangular(tex).texture;
-      tex.dispose(); pmrem.dispose();
+      const studio = new CanvasTexture(studioCanvas());
+      studio.mapping = EquirectangularReflectionMapping;
+      studio.colorSpace = SRGBColorSpace;
+      GLASS_ENV = pmrem.fromEquirectangular(studio).texture;
+      tex.dispose(); studio.dispose(); pmrem.dispose();
     } catch (e) { /* sem env map, luzes bastam */ }
 
     const resize = () => {
@@ -833,8 +912,10 @@ export default function ThreeDMaker() {
         );
         m.scale.set(s.scale[0] || 0.0001, s.scale[1] || 0.0001, s.scale[2] || 0.0001);
         const tl = clamp(s.translucency / 100, 0, 1);
-        const alphaBase = lerp(1, 0.07, tl);
         const u = m.material.userData.uniforms;
+        // vidro é sempre transparente; a translucência só abre o miolo
+        if (m.material.userData.glass) { u.uClarity.value = tl; continue; }
+        const alphaBase = lerp(1, 0.07, tl);
         if (u) {
           u.uAlphaBase.value = alphaBase;
           if ("envMapIntensity" in m.material) m.material.envMapIntensity = 1 + tl * 1.8;
@@ -1198,8 +1279,12 @@ export default function ThreeDMaker() {
       const pos = geo.attributes.position;
       const base = new Color(obj.color);
       const flat = obj.material === "flat" || obj.material === "wire";
+      const glass = obj.material === "glass";
       const tl = clamp(sampleAt(obj, playhead, easing).translucency / 100, 0, 1);
-      const alphaBase = lerp(1, 0.07, tl);
+      const alphaBase = glass ? lerp(0.92, 0.2, tl) : lerp(1, 0.07, tl);
+      // mesmas pontas do shader do vidro: miolo claro, borda funda
+      const claro = base.clone().lerp(new Color(1, 1, 1), 0.12);
+      const fundo = base.clone().multiply(base).multiplyScalar(0.7);
       const cent = new Vector3(), view = new Vector3();
       for (let i = 0; i < pos.count; i += 3) {
         a.fromBufferAttribute(pos, i).applyMatrix4(mesh.matrixWorld);
@@ -1215,9 +1300,12 @@ export default function ThreeDMaker() {
         if (p.some((q) => !Number.isFinite(q[0]) || !Number.isFinite(q[1]))) continue;
         cent.copy(a).add(b).add(c).multiplyScalar(1 / 3);
         view.subVectors(cam.position, cent).normalize();
-        const fres = Math.pow(1 - Math.abs(n.dot(view)), FRESNEL_POWER);
-        const alpha = clamp(lerp(alphaBase, 1, fres), 0, 1);
-        const col = base.clone().multiplyScalar(clamp(lamb, 0.06, 1.25));
+        const edge = 1 - Math.abs(n.dot(view));
+        const fres = Math.pow(edge, glass ? 2.2 : FRESNEL_POWER);
+        const alpha = clamp(lerp(alphaBase, glass ? 0.97 : 1, fres), 0, 1);
+        const col = glass
+          ? claro.clone().lerp(fundo, MathUtils.smoothstep(edge, 0, 0.85))
+          : base.clone().multiplyScalar(clamp(lamb, 0.06, 1.25));
         tris.push({ d: depth, p, f: `#${col.getHexString()}`, o: alpha });
       }
       if (geo !== mesh.geometry) geo.dispose();
@@ -1376,8 +1464,13 @@ export default function ThreeDMaker() {
               <Field label="Acabamento">
                 <select value={sel.material} onChange={(e) => {
                   const material = e.target.value;
-                  const glassNow = material === "glass" && sel.translucency < 5;
-                  patch(sel.id, glassNow ? { material, translucency: 70 } : { material });
+                  // vidro pede miolo aberto e reflexo nítido; só ajusta o que ainda está longe disso
+                  const vidro = material === "glass" && sel.material !== "glass";
+                  patch(sel.id, {
+                    material,
+                    ...(vidro && sel.translucency < 5 ? { translucency: 45 } : {}),
+                    ...(vidro && sel.roughness > 15 ? { roughness: 4 } : {}),
+                  });
                 }}>
                   {MATERIALS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
                 </select>
